@@ -32,6 +32,8 @@ wp-config.php
 # Log files
 *.log
 
+/vendor
+
 # htaccess
 /.htaccess
 
