@@ -20,5 +20,8 @@ add_action( 'init', function() {
 
     $container['post']->register_publish_to_msn_field();
     $container['feed']->register_hooks();
+
+    // Samsung Feed
+    add_feed( 'samsung_feed', [ $container['feed'], 'print_feed' ] );
 } );
 
