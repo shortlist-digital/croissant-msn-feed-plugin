@@ -2,7 +2,7 @@
 /**
  * @wordpress-plugin
  * Plugin Name:       Croissant MSN Feed Plugin
- * Description:       A WordPress plugin to generate an RSS Feed which is consumable by MSN
+ * Description:       A WordPress plugin to generate an RSS Feed which is consumable by MSN and Samsung
  * Version:           1.0.0
  * Author:            Stylist
  * Author URI:        http://shortlistmedia.co.uk/
@@ -21,7 +21,6 @@ add_action( 'init', function() {
     $container['post']->register_publish_to_msn_field();
     $container['feed']->register_hooks();
 
-    // Samsung Feed
+    // Samsung Feed: reuse the same FeedGenerator::print_feed()
     add_feed( 'samsung_feed', [ $container['feed'], 'print_feed' ] );
 } );
-

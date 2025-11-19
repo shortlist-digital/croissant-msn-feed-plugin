@@ -44,11 +44,22 @@ class FeedGenerator {
      * Output the feed XML.
      */
     public function print_feed() {
-        $posts     = $this->get_posts();
-        $rss_items = $this->render_post_items( $posts );
+        $posts   = $this->get_posts();
+
+        // detect which feed this is (msn_feed vs samsung_feed)
+        $feed_name  = get_query_var( 'feed' );
+        $is_samsung = ( $feed_name === 'samsung_feed' );
+
+        $rss_items = $this->render_post_items( $posts, $is_samsung );
         $charset   = get_option( 'blog_charset' );
-        $title     = get_bloginfo( 'name' );
+        $blog_name = get_bloginfo( 'name' );
         $self_link = $this->web_domain . parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH );
+
+        $channel_title       = $is_samsung ? "{$blog_name} – Samsung News" : "{$blog_name} – MSN News";
+        $channel_description = $is_samsung ? 'Custom Samsung-compatible feed' : 'Custom MSN-compatible feed';
+
+        // add media namespace only for Samsung feed
+        $media_ns = $is_samsung ? "\n     xmlns:media=\"http://search.yahoo.com/mrss/\"" : '';
 
         // send the correct content‐type
         header( 'Content-Type: application/xml; charset=' . $charset, true );
@@ -57,11 +68,11 @@ class FeedGenerator {
 <rss version="2.0"
      xmlns:dc="http://purl.org/dc/elements/1.1/"
      xmlns:atom="http://www.w3.org/2005/Atom"
-     xmlns:content="http://purl.org/rss/1.0/modules/content/">
+     xmlns:content="http://purl.org/rss/1.0/modules/content/"{$media_ns}>
   <channel>
-    <title><![CDATA[{$title} – MSN News]]></title>
+    <title><![CDATA[{$channel_title}]]></title>
     <link>{$this->web_domain}</link>
-    <description><![CDATA[Custom MSN-compatible feed]]></description>
+    <description><![CDATA[{$channel_description}]]></description>
     <language>en-US</language>
     <atom:link href="{$self_link}" rel="self" type="application/rss+xml" />
 {$rss_items}
@@ -103,21 +114,26 @@ RSS;
      * Build <item> elements.
      *
      * @param WP_Post[] $posts
+     * @param bool      $is_samsung Whether to output Samsung media:content
      * @return string
      */
-    private function render_post_items( array $posts ) {
+    private function render_post_items( array $posts, $is_samsung = false ) {
         $items = '';
 
         foreach ( $posts as $post ) {
-           // setup_postdata( $post );
-
             $link        = get_permalink( $post );
             $pub_date    = get_post_time( 'D, d M Y H:i:s', true, $post ) . ' GMT';
             $title       = get_the_title( $post );
             $author      = get_the_author_meta( 'display_name', $post->post_author );
             $excerpt     = htmlspecialchars( get_post_meta( $post->ID, 'seo_description', true ) ?: get_the_excerpt( $post ) );
-            $hero_encl   = $this->render_hero( $post->ID );
             $widget_html = $this->map_post_widgets_to_content_rss_fields( $post );
+
+            // MSN vs Samsung hero handling
+            if ( $is_samsung ) {
+                $hero_block = $this->render_hero_media_content( $post->ID );
+            } else {
+                $hero_block = $this->render_hero_enclosure( $post->ID );
+            }
 
             $items .= <<<ITEM
 
@@ -128,13 +144,11 @@ RSS;
       <pubDate>{$pub_date}</pubDate>
       <dc:creator><![CDATA[{$author}]]></dc:creator>
       <description><![CDATA[{$excerpt}]]></description>
-      {$hero_encl}
+      {$hero_block}
       <content:encoded><![CDATA[{$widget_html}]]></content:encoded>
     </item>
 ITEM;
         }
-
-       // wp_reset_postdata();
 
         return $items;
     }
@@ -156,29 +170,124 @@ ITEM;
     }
 
     /**
-     * Render first hero image as an <enclosure>.
+     * Render first hero image as an <enclosure> (MSN feed).
      *
      * @param int $post_id
      * @return string
      */
-    private function render_hero( $post_id ) {
+    private function render_hero_enclosure( $post_id ) {
         $images = get_field( 'hero_images', $post_id );
         if ( ! is_array( $images ) || empty( $images[0]['url'] ) ) {
             return '';
         }
 
-        $url = $images[0]['url'];
+        $image = $images[0];
+
+        // Ensure it's an image, not a video
+        if ( isset( $image['type'] ) && $image['type'] !== 'image' ) {
+            return '';
+        }
+
+        $url = $image['url'];
         if ( $this->images_host ) {
             $parts         = wp_parse_url( $url );
             $parts['host'] = $this->images_host;
             $url           = "{$parts['scheme']}://{$parts['host']}{$parts['path']}";
         }
 
-        $type   = "{$images[0]['type']}/{$images[0]['subtype']}";
+        $type = '';
+        if ( ! empty( $image['mime_type'] ) ) {
+            $type = $image['mime_type'];
+        } elseif ( ! empty( $image['type'] ) && ! empty( $image['subtype'] ) ) {
+            $type = "{$image['type']}/{$image['subtype']}";
+        } else {
+            $type = 'image/jpeg';
+        }
+
         $head   = wp_remote_head( $url );
         $length = wp_remote_retrieve_header( $head, 'content-length' ) ?: '';
 
-        return "<enclosure url=\"{$url}\" type=\"{$type}\" length=\"{$length}\" />";
+        $url_esc  = esc_url( $url );
+        $type_esc = esc_attr( $type );
+        $len_esc  = esc_attr( $length );
+
+        return "<enclosure url=\"{$url_esc}\" type=\"{$type_esc}\" length=\"{$len_esc}\" />";
+    }
+
+    /**
+     * Render first hero image as a <media:content> block (Samsung feed).
+     *
+     * <media:content> contains the hero/lead image URL (ONLY image file formats, NO videos)
+     * Nested:
+     *   - <media:title> OR <media:description> (we'll use description)
+     *   - <media:credit> OR <media:copyright> (we'll use credit)
+     *
+     * @param int $post_id
+     * @return string
+     */
+    private function render_hero_media_content( $post_id ) {
+        $images = get_field( 'hero_images', $post_id );
+        if ( ! is_array( $images ) || empty( $images[0]['url'] ) ) {
+            return '';
+        }
+
+        $image = $images[0];
+
+        // Only allow images (NO videos)
+        if ( isset( $image['type'] ) && $image['type'] !== 'image' ) {
+            return '';
+        }
+
+        $url = $image['url'];
+        if ( $this->images_host ) {
+            $parts         = wp_parse_url( $url );
+            $parts['host'] = $this->images_host;
+            $url           = "{$parts['scheme']}://{$parts['host']}{$parts['path']}";
+        }
+
+        // Determine mime type if available
+        if ( ! empty( $image['mime_type'] ) ) {
+            $mime_type = $image['mime_type'];
+        } elseif ( ! empty( $image['type'] ) && ! empty( $image['subtype'] ) ) {
+            $mime_type = "{$image['type']}/{$image['subtype']}";
+        } else {
+            $mime_type = 'image/jpeg'; // safe default
+        }
+
+        // Description / title
+        $description = $image['description'] ?? '';
+        if ( ! $description ) {
+            $description = $image['caption'] ?? '';
+        }
+        if ( ! $description ) {
+            $description = $image['alt'] ?? '';
+        }
+        if ( ! $description ) {
+            $description = $image['title'] ?? '';
+        }
+
+        // Credit / copyright – adjust field names to match your ACF if needed
+        $credit = $image['credit'] ?? '';
+        if ( ! $credit && ! empty( $image['copyright'] ) ) {
+            $credit = $image['copyright'];
+        }
+
+        $url_esc   = esc_url( $url );
+        $mime_esc  = esc_attr( $mime_type );
+
+        $description_cdata = $description
+            ? "<media:description><![CDATA[{$description}]]></media:description>"
+            : '';
+        $credit_cdata = $credit
+            ? "<media:credit><![CDATA[{$credit}]]></media:credit>"
+            : '';
+
+        return <<<MEDIA
+      <media:content url="{$url_esc}" type="{$mime_esc}">
+        {$description_cdata}
+        {$credit_cdata}
+      </media:content>
+MEDIA;
     }
 
     /**
