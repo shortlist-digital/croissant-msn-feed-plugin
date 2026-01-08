@@ -19,8 +19,11 @@ add_action( 'init', function() {
     $container = require __DIR__ . '/container.php';
 
     $container['post']->register_publish_to_msn_field();
+
+    // MSN feed
     $container['feed']->register_hooks();
 
-    // Samsung Feed: reuse the same FeedGenerator::print_feed()
+    // Samsung feed: reuse the same FeedGenerator::print_feed()
     add_feed( 'samsung_feed', [ $container['feed'], 'print_feed' ] );
 } );
+

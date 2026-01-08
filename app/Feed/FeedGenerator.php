@@ -20,12 +20,6 @@ class FeedGenerator {
     /** @var Image */
     private $image_helper;
 
-    /**
-     * @param WP_Query    $wp_query     A WP_Query instance
-     * @param string      $web_domain   e.g. https://www.example.com
-     * @param string      $images_host  optional override hostname for images
-     * @param Image       $image_helper helper to fetch attachment metadata
-     */
     public function __construct( WP_Query $wp_query, $web_domain, $images_host, Image $image_helper ) {
         $this->wp_query     = $wp_query;
         $this->web_domain   = rtrim( $web_domain, '/' );
@@ -33,20 +27,14 @@ class FeedGenerator {
         $this->image_helper = $image_helper;
     }
 
-    /**
-     * Hook our custom feed.
-     */
     public function register_hooks() {
         add_feed( 'msn_feed', [ $this, 'print_feed' ] );
+        // samsung_feed is registered in plugin bootstrap (as you already do)
     }
 
-    /**
-     * Output the feed XML.
-     */
     public function print_feed() {
-        $posts   = $this->get_posts();
+        $posts = $this->get_posts();
 
-        // detect which feed this is (msn_feed vs samsung_feed)
         $feed_name  = get_query_var( 'feed' );
         $is_samsung = ( $feed_name === 'samsung_feed' );
 
@@ -58,11 +46,11 @@ class FeedGenerator {
         $channel_title       = $is_samsung ? "{$blog_name} – Samsung News" : "{$blog_name} – MSN News";
         $channel_description = $is_samsung ? 'Custom Samsung-compatible feed' : 'Custom MSN-compatible feed';
 
-        // add media namespace only for Samsung feed
+        // Samsung: MRSS namespace for <media:content>
         $media_ns = $is_samsung ? "\n     xmlns:media=\"http://search.yahoo.com/mrss/\"" : '';
 
-        // send the correct content‐type
         header( 'Content-Type: application/xml; charset=' . $charset, true );
+
         echo <<<RSS
 <?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"
@@ -80,13 +68,10 @@ class FeedGenerator {
 </rss>
 RSS;
 
-        // stop WP from appending HTML
         exit;
     }
 
     /**
-     * Fetch only the latest 30 posts where our ACF flag is on.
-     *
      * @return WP_Post[]
      */
     private function get_posts() {
@@ -110,37 +95,30 @@ RSS;
         return $q->posts;
     }
 
-    /**
-     * Build <item> elements.
-     *
-     * @param WP_Post[] $posts
-     * @param bool      $is_samsung Whether to output Samsung media:content
-     * @return string
-     */
     private function render_post_items( array $posts, $is_samsung = false ) {
         $items = '';
 
         foreach ( $posts as $post ) {
-            $link        = get_permalink( $post );
-            $pub_date    = get_post_time( 'D, d M Y H:i:s', true, $post ) . ' GMT';
-            $title       = get_the_title( $post );
-            $author      = get_the_author_meta( 'display_name', $post->post_author );
-            $excerpt     = htmlspecialchars( get_post_meta( $post->ID, 'seo_description', true ) ?: get_the_excerpt( $post ) );
-            $widget_html = $this->map_post_widgets_to_content_rss_fields( $post );
+            $link     = get_permalink( $post );
+            $pub_date = get_post_time( 'D, d M Y H:i:s', true, $post ) . ' GMT';
+            $title    = get_the_title( $post );
+            $author   = get_the_author_meta( 'display_name', $post->post_author );
 
-            // MSN vs Samsung hero handling
-            if ( $is_samsung ) {
-                $hero_block = $this->render_hero_media_content( $post->ID );
-            } else {
-                $hero_block = $this->render_hero_enclosure( $post->ID );
-            }
+            $excerpt_raw = get_post_meta( $post->ID, 'seo_description', true ) ?: get_the_excerpt( $post );
+            $excerpt     = htmlspecialchars( (string) $excerpt_raw );
+
+            $widget_html = $this->map_post_widgets_to_content_rss_fields( $post, $is_samsung );
+
+            $hero_block = $is_samsung
+                ? $this->render_hero_media_content( $post->ID )
+                : $this->render_hero_enclosure( $post->ID );
 
             $items .= <<<ITEM
 
     <item>
       <title><![CDATA[{$title}]]></title>
       <link>{$link}</link>
-      <guid>{$link}</guid>
+      <guid isPermaLink="true">{$link}</guid>
       <pubDate>{$pub_date}</pubDate>
       <dc:creator><![CDATA[{$author}]]></dc:creator>
       <description><![CDATA[{$excerpt}]]></description>
@@ -154,8 +132,6 @@ ITEM;
     }
 
     /**
-     * Restrict to public post types.
-     *
      * @return string[]
      */
     private function get_public_post_types() {
@@ -170,10 +146,7 @@ ITEM;
     }
 
     /**
-     * Render first hero image as an <enclosure> (MSN feed).
-     *
-     * @param int $post_id
-     * @return string
+     * MSN: hero image as <enclosure>
      */
     private function render_hero_enclosure( $post_id ) {
         $images = get_field( 'hero_images', $post_id );
@@ -183,16 +156,13 @@ ITEM;
 
         $image = $images[0];
 
-        // Ensure it's an image, not a video
         if ( isset( $image['type'] ) && $image['type'] !== 'image' ) {
             return '';
         }
 
-        $url = $image['url'];
-        if ( $this->images_host ) {
-            $parts         = wp_parse_url( $url );
-            $parts['host'] = $this->images_host;
-            $url           = "{$parts['scheme']}://{$parts['host']}{$parts['path']}";
+        $url = $this->resolve_image_url( $image['url'] );
+        if ( ! $url ) {
+            return '';
         }
 
         $type = '';
@@ -215,15 +185,7 @@ ITEM;
     }
 
     /**
-     * Render first hero image as a <media:content> block (Samsung feed).
-     *
-     * <media:content> contains the hero/lead image URL (ONLY image file formats, NO videos)
-     * Nested:
-     *   - <media:title> OR <media:description> (we'll use description)
-     *   - <media:credit> OR <media:copyright> (we'll use credit)
-     *
-     * @param int $post_id
-     * @return string
+     * Samsung: hero image as <media:content ... />
      */
     private function render_hero_media_content( $post_id ) {
         $images = get_field( 'hero_images', $post_id );
@@ -233,180 +195,214 @@ ITEM;
 
         $image = $images[0];
 
-        // Only allow images (NO videos)
         if ( isset( $image['type'] ) && $image['type'] !== 'image' ) {
             return '';
         }
 
-        $url = $image['url'];
-        if ( $this->images_host ) {
-            $parts         = wp_parse_url( $url );
-            $parts['host'] = $this->images_host;
-            $url           = "{$parts['scheme']}://{$parts['host']}{$parts['path']}";
+        $url = $this->resolve_image_url( $image['url'] );
+        if ( ! $url ) {
+            return '';
         }
 
-        // Determine mime type if available
         if ( ! empty( $image['mime_type'] ) ) {
             $mime_type = $image['mime_type'];
         } elseif ( ! empty( $image['type'] ) && ! empty( $image['subtype'] ) ) {
             $mime_type = "{$image['type']}/{$image['subtype']}";
         } else {
-            $mime_type = 'image/jpeg'; // safe default
+            $mime_type = 'image/jpeg';
         }
 
-        // Description / title
-        $description = $image['description'] ?? '';
-        if ( ! $description ) {
-            $description = $image['caption'] ?? '';
-        }
-        if ( ! $description ) {
-            $description = $image['alt'] ?? '';
-        }
-        if ( ! $description ) {
-            $description = $image['title'] ?? '';
-        }
+        $url_esc  = esc_url( $url );
+        $mime_esc = esc_attr( $mime_type ?: 'image/jpeg' );
 
-        // Credit / copyright – adjust field names to match your ACF if needed
-        $credit = $image['credit'] ?? '';
-        if ( ! $credit && ! empty( $image['copyright'] ) ) {
-            $credit = $image['copyright'];
-        }
-
-        $url_esc   = esc_url( $url );
-        $mime_esc  = esc_attr( $mime_type );
-
-        $description_cdata = $description
-            ? "<media:description><![CDATA[{$description}]]></media:description>"
-            : '';
-        $credit_cdata = $credit
-            ? "<media:credit><![CDATA[{$credit}]]></media:credit>"
-            : '';
-
-        return <<<MEDIA
-      <media:content url="{$url_esc}" type="{$mime_esc}">
-        {$description_cdata}
-        {$credit_cdata}
-      </media:content>
-MEDIA;
+        return "      <media:content url=\"{$url_esc}\" type=\"{$mime_esc}\" />\n";
     }
 
     /**
-     * Map ACF widgets to an HTML string, per your sample.
+     * Convert ACF widgets -> HTML for <content:encoded>
+     *
+     * Samsung mode:
+     * - Keep inline images (<img>) but ensure URLs are valid
+     * - Remove iframes/scripts (and for embed widgets output original link)
      *
      * @param WP_Post $post
-     * @return string UTF-8–safe HTML of all widgets
+     * @param bool    $is_samsung
+     * @return string
      */
-    public function map_post_widgets_to_content_rss_fields( WP_Post $post ) {
+    public function map_post_widgets_to_content_rss_fields( WP_Post $post, $is_samsung = false ) {
         $content = '';
         $widgets = get_field( 'widgets', $post->ID ) ?: [];
+
         foreach ( $widgets as $widget ) {
-            switch ( $widget['acf_fc_layout'] ) {
+            $layout = $widget['acf_fc_layout'] ?? '';
+
+            switch ( $layout ) {
                 case 'paragraph':
-                    $content .= $widget['paragraph'];
+                    $content .= $widget['paragraph'] ?? '';
                     break;
+
                 case 'divider':
-                    $content .= $widget['divider'];
+                    $content .= $widget['divider'] ?? '';
                     break;
+
                 case 'heading':
-                    $content .= '<h2>' . $widget['text'] . '</h2>';
+                    $content .= '<h2>' . esc_html( $widget['text'] ?? '' ) . '</h2>';
                     break;
+
                 case 'image':
-                    $meta    = $this->image_helper->get_attachment_metadata( $widget['image'] );
-                    $url     = $meta['doris_sizes']['square'] ?? '';
-                    $alt     = $meta['alt'] ?? '';
-                    $caption = $meta['description'] ?? '';
-                    $content .= "<figure class='pp-media pp-media--pull-centre'>";
-                    $content .= "<img class=\"pp-media__image\" alt=\"{$alt}\" src=\"{$url}\">";
-                    if ( $caption ) {
-                        $content .= "<figcaption class=\"pp-media__caption\">{$caption}</figcaption>";
-                    }
-                    $content .= "</figure>";
+                    $content .= $this->render_image_figure_html( $widget['image'] ?? null, 'pp-media pp-media--pull-centre', 'square' );
                     break;
-                case 'html':
-                    $content .= $widget['html'];
+
+                case 'interactive_image':
+                    // only show first image
+                    $first = $widget['first_image'] ?? null;
+                    $content .= $this->render_image_figure_html( $first, '', 'square' );
                     break;
+
                 case 'listicle':
                     $content .= "<section class='listicle'>";
-                    foreach ( $widget['item'] as $item ) {
-                        if ( $item['media_type'] === 'image' ) {
-                            $m = $this->image_helper->get_attachment_metadata( $item['image'] );
-                            $s = $m['doris_sizes']['square'] ?? '';
-                            $a = $m['alt'] ?? '';
-                            $c = $m['description'] ?? '';
-                            $content .= "<figure class=\"pp-media listicle__image\">";
-                            $content .= "<img class=\"pp-media__image\" alt=\"{$a}\" src=\"{$s}\">";
-                            if ( $c ) {
-                                $content .= "<figcaption class=\"pp-media__caption\">{$c}</figcaption>";
+
+                    foreach ( $widget['item'] ?? [] as $item ) {
+                        $media_type = $item['media_type'] ?? '';
+
+                        if ( $media_type === 'image' ) {
+                            $content .= $this->render_image_figure_html( $item['image'] ?? null, 'pp-media listicle__image', 'square' );
+                        }
+
+                        if ( $media_type === 'loop' ) {
+                            // Samsung: exclude videos
+                            if ( ! $is_samsung ) {
+                                $v = esc_url( $item['video'] ?? '' );
+                                if ( $v ) {
+                                    $content .= "<video src=\"{$v}\" preload=\"auto\" muted autoplay loop playsinline webkit-playsinline x5-playsinline style=\"width:100%;height:100%;\"></video>";
+                                }
                             }
-                            $content .= "</figure>";
                         }
-                        if ( $item['media_type'] === 'loop' ) {
-                            $content .= "<video src=\"{$item['video']}\" preload=\"auto\" muted autoplay loop playsinline webkit-playsinline x5-playsinline style=\"width:100%;height:100%;\"></video>";
+
+                        if ( $media_type === 'embed' ) {
+                            if ( $is_samsung ) {
+                                $orig = $this->extract_original_embed_url_from_item( $item );
+                                if ( $orig ) {
+                                    $o = esc_url( $orig );
+                                    $content .= "<p><a href=\"{$o}\">{$o}</a></p>";
+                                }
+                            } else {
+                                $content .= $item['embed'] ?? '';
+                            }
                         }
-                        if ( $item['media_type'] === 'embed' ) {
-                            $content .= $item['embed'];
+
+                        $t = $item['title'] ?? '';
+                        $p = $item['paragraph'] ?? '';
+
+                        if ( $t ) {
+                            $content .= "<h4 class=\"listicle__title\">" . esc_html( $t ) . "</h4>";
                         }
-                        $content .= "<h4 class=\"listicle__title\">{$item['title']}</h4>";
-                        $content .= "<div class=\"listicle__paragraph\">{$item['paragraph']}</div>";
+                        if ( $p ) {
+                            $content .= "<div class=\"listicle__paragraph\">{$p}</div>";
+                        }
+
                         if ( ! empty( $item['label'] ) && ! empty( $item['url'] ) ) {
-                            $content .= "<a class=\"listicle__link\" href=\"{$item['url']}\">{$item['label']}</a>";
+                            $u = esc_url( $item['url'] );
+                            $l = esc_html( $item['label'] );
+                            $content .= "<a class=\"listicle__link\" href=\"{$u}\">{$l}</a>";
                         }
                     }
+
                     $content .= "</section>";
                     break;
+
                 case 'embed':
-                    if ( str_contains( $widget['embed_link'], 'youtube' ) ) {
-                        $content .= "<p class=\"stylist-youtube\">{$widget['embed']}</p>";
+                    if ( $is_samsung ) {
+                        $orig = $this->get_original_embed_url( (array) $widget );
+                        if ( $orig ) {
+                            $o = esc_url( $orig );
+                            $content .= "<p><a href=\"{$o}\">{$o}</a></p>";
+                        }
+                        break;
+                    }
+
+                    if ( ! empty( $widget['embed_link'] ) && str_contains( $widget['embed_link'], 'youtube' ) ) {
+                        $content .= "<p class=\"stylist-youtube\">" . ( $widget['embed'] ?? '' ) . "</p>";
                     } else {
-                        $content .= $widget['embed'];
+                        $content .= $widget['embed'] ?? '';
                     }
                     break;
-                case 'button':
-                    $content .= "<a class=\"button\" href=\"{$widget['url']}\">{$widget['label']}</a>";
+
+                case 'html':
+                    if ( $is_samsung ) {
+                        // Strip iframes/scripts; keep images/links/basic formatting
+                        $content .= wp_kses( (string) ( $widget['html'] ?? '' ), $this->get_samsung_allowed_html() );
+                        break;
+                    }
+                    $content .= $widget['html'] ?? '';
                     break;
+
+                case 'button':
+                    $url   = esc_url( $widget['url'] ?? '' );
+                    $label = esc_html( $widget['label'] ?? '' );
+                    if ( $url && $label ) {
+                        $content .= "<a class=\"button\" href=\"{$url}\">{$label}</a>";
+                    }
+                    break;
+
                 case 'pull-quote':
                     static $cnt = 0;
                     $cnt++;
+                    $text   = esc_html( $widget['text'] ?? '' );
+                    $author = esc_html( $widget['quote_author'] ?? '' );
+
                     $content .= "<section class=\"pp-article__boxout\">";
                     $content .= "<div id=\"boxout_{$cnt}\" class=\"pp-boxout\" style=\"background-color:#606060;\">";
                     $content .= "<div class=\"pp-boxout__body\">";
-                    $content .= "<h4>{$widget['text']}</h4>";
-                    $content .= "<p>{$widget['quote_author']}</p>";
+                    $content .= "<h4>{$text}</h4>";
+                    $content .= "<p>{$author}</p>";
                     $content .= "</div></div></section>";
                     break;
+
                 case 'product-carousel':
                     $content .= "<section class='product-carousel'>";
-                    foreach ( $widget['products'] as $p ) {
-                        $pm = $this->image_helper->get_attachment_metadata( $p['thumbnail'] );
-                        $ps = $pm['doris_sizes']['square'] ?? '';
-                        $pa = $pm['alt'] ?? '';
+                    foreach ( $widget['products'] ?? [] as $p ) {
                         $content .= "<div class='product'>";
-                        $content .= "<img class='product__image' alt=\"{$pa}\" src=\"{$ps}\">";
-                        $content .= "<h4 class='product__name'>{$p['product_text']}</h4>";
+
+                        // thumbnail can be ACF image array OR attachment ID
+                        $thumb_html = $this->render_image_img_only_html( $p['thumbnail'] ?? null, 'product__image', 'square' );
+                        if ( $thumb_html ) {
+                            $content .= $thumb_html;
+                        }
+
+                        $content .= "<h4 class='product__name'>" . esc_html( $p['product_text'] ?? '' ) . "</h4>";
                         if ( ! empty( $p['price'] ) ) {
-                            $content .= "<span class='product__price'>{$p['price']}</span>";
+                            $content .= "<span class='product__price'>" . esc_html( $p['price'] ) . "</span>";
                         }
-                        $content .= "<div class='product__description'>{$p['product_description']}</div>";
+                        $content .= "<div class='product__description'>" . ( $p['product_description'] ?? '' ) . "</div>";
+
                         if ( ! empty( $p['button_text'] ) && ! empty( $p['button_url'] ) ) {
-                            $content .= "<a class='product__button' href=\"{$p['button_url']}\">{$p['button_text']}</a>";
+                            $bu = esc_url( $p['button_url'] );
+                            $bt = esc_html( $p['button_text'] );
+                            $content .= "<a class='product__button' href=\"{$bu}\">{$bt}</a>";
                         }
+
                         $content .= "</div>";
                     }
                     $content .= "</section>";
                     break;
+
                 case 'looping_video':
-                    // render a looping video tag
-                    $video = esc_url( $widget['video'] );
-                    $content .= "<video src=\"{$video}\" preload=\"auto\" muted autoplay loop playsinline webkit-playsinline x5-playsinline style=\"width:100%;height:auto;\"></video>";
+                    // Samsung: exclude videos
+                    if ( ! $is_samsung ) {
+                        $video = esc_url( $widget['video'] ?? '' );
+                        if ( $video ) {
+                            $content .= "<video src=\"{$video}\" preload=\"auto\" muted autoplay loop playsinline webkit-playsinline x5-playsinline style=\"width:100%;height:auto;\"></video>";
+                        }
+                    }
                     break;
 
                 case 'list_widget':
-                    // render as a numbered list
                     $items = $widget['ingredients'] ?? [];
                     if ( $items ) {
                         $content .= '<ol>';
                         foreach ( $items as $item ) {
-                            $body   = $item['body']   ?? '';
+                            $body   = $item['body'] ?? '';
                             $header = $item['header'] ?? '';
                             $content .= '<li>';
                             if ( $header ) {
@@ -420,33 +416,239 @@ MEDIA;
                     break;
 
                 case 'instructions':
-                    // also a numbered list of steps
                     $steps = $widget['steps'] ?? [];
                     if ( $steps ) {
                         $content .= '<ol>';
                         foreach ( $steps as $step ) {
-                            $text = $step['text'] ?? '';
-                            $content .= '<li>' . $text . '</li>';
+                            $content .= '<li>' . ( $step['text'] ?? '' ) . '</li>';
                         }
                         $content .= '</ol>';
                     }
                     break;
 
-                case 'interactive_image':
-                    // only show the first image
-                    $first = $widget['first_image'] ?? [];
-                    if ( ! empty( $first['url'] ) ) {
-                        $url = esc_url( $first['url'] );
-                        $alt = esc_attr( $first['alt'] ?? '' );
-                        $content .= "<figure><img src=\"{$url}\" alt=\"{$alt}\" /></figure>";
-                    }
-                    break;
                 default:
+                    // keep your original defaults for other widget types if required
                     break;
             }
         }
 
-        // force UTF-8
+        // Final Samsung clean: remove iframes/scripts but keep <img>
+        if ( $is_samsung ) {
+            $content = wp_kses( $content, $this->get_samsung_allowed_html() );
+        }
+
         return mb_convert_encoding( $content, 'UTF-8', 'auto' );
+    }
+
+    /**
+     * Render a <figure><img></figure> from either:
+     * - ACF image array (like your debug output)
+     * - Attachment ID (int)
+     *
+     * Returns '' if URL is invalid (prevents src="https://cms.stylist.co.uk/").
+     */
+    private function render_image_figure_html( $img, $figure_class = '', $prefer_size = 'square' ) {
+        [ $raw_url, $alt, $caption ] = $this->pick_image_fields( $img, $prefer_size );
+
+        $url = $this->resolve_image_url( $raw_url );
+        if ( ! $url ) {
+            return '';
+        }
+
+        $alt_esc = esc_attr( $alt );
+        $cls     = $figure_class ? " class='" . esc_attr( $figure_class ) . "'" : '';
+
+        $html  = "<figure{$cls}>";
+        $html .= "<img class=\"pp-media__image\" alt=\"{$alt_esc}\" src=\"" . esc_url( $url ) . "\">";
+        if ( $caption ) {
+            $html .= "<figcaption class=\"pp-media__caption\">" . esc_html( $caption ) . "</figcaption>";
+        }
+        $html .= "</figure>";
+
+        return $html;
+    }
+
+    /**
+     * Render <img ...> only (used for product thumbnails).
+     */
+    private function render_image_img_only_html( $img, $img_class = '', $prefer_size = 'square' ) {
+        [ $raw_url, $alt ] = $this->pick_image_fields( $img, $prefer_size, false );
+        $url = $this->resolve_image_url( $raw_url );
+        if ( ! $url ) {
+            return '';
+        }
+
+        $class_attr = $img_class ? ' class="' . esc_attr( $img_class ) . '"' : '';
+        return "<img{$class_attr} alt=\"" . esc_attr( $alt ) . "\" src=\"" . esc_url( $url ) . "\">";
+    }
+
+    /**
+     * Extract (url, alt, caption) from either ACF image array or attachment ID.
+     *
+     * @param mixed $img
+     * @param string $prefer_size e.g. 'square', 'large', etc
+     * @param bool $include_caption
+     * @return array
+     */
+    private function pick_image_fields( $img, $prefer_size = 'square', $include_caption = true ) {
+        $raw_url = '';
+        $alt     = '';
+        $caption = '';
+
+        if ( is_array( $img ) ) {
+            // ACF image array (your debug output)
+            $raw_url = $img['sizes'][ $prefer_size ] ?? ( $img['url'] ?? '' );
+            $alt     = (string) ( $img['alt'] ?? '' );
+            if ( $include_caption ) {
+                $caption = (string) ( $img['description'] ?? ( $img['caption'] ?? '' ) );
+            }
+        } else {
+            $id = (int) $img;
+            if ( $id > 0 ) {
+                $meta = $this->image_helper->get_attachment_metadata( $id );
+
+                // helper-specific + fallbacks
+                $raw_url = $meta['doris_sizes'][ $prefer_size ] ?? ( $meta['url'] ?? ( $meta['source_url'] ?? '' ) );
+                $alt     = (string) ( $meta['alt'] ?? '' );
+                if ( $include_caption ) {
+                    $caption = (string) ( $meta['description'] ?? '' );
+                }
+            }
+        }
+
+        return $include_caption ? [ $raw_url, $alt, $caption ] : [ $raw_url, $alt ];
+    }
+
+    /**
+     * Allowed HTML for Samsung <content:encoded>.
+     * - keeps <img>
+     * - strips iframes/scripts automatically
+     */
+    private function get_samsung_allowed_html() {
+        return [
+            'p'      => [ 'class' => true ],
+            'br'     => [],
+            'strong' => [],
+            'em'     => [],
+            'b'      => [],
+            'i'      => [],
+            'u'      => [],
+            'h2'     => [],
+            'h3'     => [],
+            'h4'     => [],
+            'ul'     => [],
+            'ol'     => [],
+            'li'     => [],
+            'blockquote' => [],
+            'section' => [ 'class' => true ],
+            'div'     => [ 'class' => true ],
+            'span'    => [ 'class' => true ],
+            'figure'  => [ 'class' => true ],
+            'figcaption' => [ 'class' => true ],
+            'img'     => [
+                'class' => true,
+                'alt'   => true,
+                'src'   => true,
+            ],
+            'a'       => [
+                'href'   => true,
+                'title'  => true,
+                'rel'    => true,
+                'target' => true,
+            ],
+        ];
+    }
+
+    /**
+     * Prefer ACF's embed_link (original), avoid embeds.stylist.co.uk URLs.
+     */
+    private function get_original_embed_url( array $widget ) {
+        $original = trim( (string) ( $widget['embed_link'] ?? '' ) );
+        if ( $original && ! str_contains( $original, 'embeds.stylist.co.uk' ) ) {
+            return $original;
+        }
+
+        $html = (string) ( $widget['embed'] ?? '' );
+
+        if ( preg_match_all( '#https?://[^\s"\']+#i', $html, $m ) ) {
+            foreach ( $m[0] as $u ) {
+                if ( ! str_contains( $u, 'embeds.stylist.co.uk' ) ) {
+                    return $u;
+                }
+            }
+        }
+
+        return '';
+    }
+
+    private function extract_original_embed_url_from_item( array $item ) {
+        // if your item has a canonical url field, use it
+        $maybe = trim( (string) ( $item['url'] ?? '' ) );
+        if ( $maybe && ! str_contains( $maybe, 'embeds.stylist.co.uk' ) ) {
+            return $maybe;
+        }
+
+        $embed_html = (string) ( $item['embed'] ?? '' );
+        if ( preg_match_all( '#https?://[^\s"\']+#i', $embed_html, $m ) ) {
+            foreach ( $m[0] as $u ) {
+                if ( ! str_contains( $u, 'embeds.stylist.co.uk' ) ) {
+                    return $u;
+                }
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Return a usable absolute image URL or ''.
+     * Prevents domain-only URLs like "https://cms.stylist.co.uk/" and ensures file extension.
+     */
+    private function resolve_image_url( $raw_url ) {
+        $url = $this->resolve_asset_url( $raw_url );
+        if ( ! $url ) {
+            return '';
+        }
+
+        $parts = wp_parse_url( $url );
+        $path  = $parts['path'] ?? '';
+
+        if ( $path === '' || $path === '/' ) {
+            return '';
+        }
+
+        // Allow common raster formats. Add svg if you need it.
+        if ( ! preg_match( '#\.(jpe?g|png|gif|webp|avif)(\?.*)?$#i', $path ) ) {
+            return '';
+        }
+
+        return $url;
+    }
+
+    /**
+     * Ensure asset URLs are absolute and optionally rewritten to $images_host.
+     */
+    private function resolve_asset_url( $raw_url ) {
+        $raw_url = trim( (string) $raw_url );
+        if ( $raw_url === '' ) {
+            return '';
+        }
+
+        if ( str_starts_with( $raw_url, '/' ) ) {
+            $raw_url = $this->web_domain . $raw_url;
+        }
+
+        if ( ! preg_match( '#^https?://#i', $raw_url ) ) {
+            $raw_url = $this->web_domain . '/' . ltrim( $raw_url, '/' );
+        }
+
+        if ( $this->images_host ) {
+            $parts = wp_parse_url( $raw_url );
+            if ( ! empty( $parts['scheme'] ) && ! empty( $parts['path'] ) ) {
+                $raw_url = "{$parts['scheme']}://{$this->images_host}{$parts['path']}";
+            }
+        }
+
+        return $raw_url;
     }
 }
