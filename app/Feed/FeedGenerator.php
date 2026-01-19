@@ -122,8 +122,7 @@ RSS;
       <pubDate>{$pub_date}</pubDate>
       <dc:creator><![CDATA[{$author}]]></dc:creator>
       <description><![CDATA[{$excerpt}]]></description>
-      {$hero_block}
-      <content:encoded><![CDATA[{$widget_html}]]></content:encoded>
+{$hero_block}      <content:encoded><![CDATA[{$widget_html}]]></content:encoded>
     </item>
 ITEM;
         }
@@ -181,11 +180,16 @@ ITEM;
         $type_esc = esc_attr( $type );
         $len_esc  = esc_attr( $length );
 
-        return "<enclosure url=\"{$url_esc}\" type=\"{$type_esc}\" length=\"{$len_esc}\" />";
+        return "      <enclosure url=\"{$url_esc}\" type=\"{$type_esc}\" length=\"{$len_esc}\" />\n";
     }
 
     /**
-     * Samsung: hero image as <media:content ... />
+     * Samsung: hero image as <media:content> with optional <media:credit>
+     *
+     * Output format:
+     * <media:content url="..." type="...">
+     *   <media:credit><![CDATA[...]]></media:credit>
+     * </media:content>
      */
     private function render_hero_media_content( $post_id ) {
         $images = get_field( 'hero_images', $post_id );
@@ -212,10 +216,35 @@ ITEM;
             $mime_type = 'image/jpeg';
         }
 
+        // HERO CREDIT: try common ACF keys; adjust if your field uses a specific key.
+        $credit_raw = '';
+        foreach ( [ 'credit', 'credits', 'caption', 'description', 'photographer' ] as $k ) {
+            if ( ! empty( $image[ $k ] ) ) {
+                $credit_raw = $image[ $k ];
+                break;
+            }
+        }
+
+        // Fallback: if hero_images is a WP attachment array, it often has 'id'
+        if ( ! $credit_raw && ! empty( $image['id'] ) ) {
+            $att_id = (int) $image['id'];
+            if ( $att_id > 0 ) {
+                $credit_raw = wp_get_attachment_caption( $att_id );
+            }
+        }
+
+        $credit_raw = is_string( $credit_raw ) ? trim( $credit_raw ) : '';
+        $credit_xml = $credit_raw !== ''
+            ? "        <media:credit><![CDATA[{$credit_raw}]]></media:credit>\n"
+            : '';
+
         $url_esc  = esc_url( $url );
         $mime_esc = esc_attr( $mime_type ?: 'image/jpeg' );
 
-        return "      <media:content url=\"{$url_esc}\" type=\"{$mime_esc}\" />\n";
+        return
+            "      <media:content url=\"{$url_esc}\" type=\"{$mime_esc}\">\n" .
+            $credit_xml .
+            "      </media:content>\n";
     }
 
     /**
@@ -254,7 +283,6 @@ ITEM;
                     break;
 
                 case 'interactive_image':
-                    // only show first image
                     $first = $widget['first_image'] ?? null;
                     $content .= $this->render_image_figure_html( $first, '', 'square' );
                     break;
@@ -270,7 +298,6 @@ ITEM;
                         }
 
                         if ( $media_type === 'loop' ) {
-                            // Samsung: exclude videos
                             if ( ! $is_samsung ) {
                                 $v = esc_url( $item['video'] ?? '' );
                                 if ( $v ) {
@@ -330,7 +357,6 @@ ITEM;
 
                 case 'html':
                     if ( $is_samsung ) {
-                        // Strip iframes/scripts; keep images/links/basic formatting
                         $content .= wp_kses( (string) ( $widget['html'] ?? '' ), $this->get_samsung_allowed_html() );
                         break;
                     }
@@ -364,7 +390,6 @@ ITEM;
                     foreach ( $widget['products'] ?? [] as $p ) {
                         $content .= "<div class='product'>";
 
-                        // thumbnail can be ACF image array OR attachment ID
                         $thumb_html = $this->render_image_img_only_html( $p['thumbnail'] ?? null, 'product__image', 'square' );
                         if ( $thumb_html ) {
                             $content .= $thumb_html;
@@ -388,7 +413,6 @@ ITEM;
                     break;
 
                 case 'looping_video':
-                    // Samsung: exclude videos
                     if ( ! $is_samsung ) {
                         $video = esc_url( $widget['video'] ?? '' );
                         if ( $video ) {
@@ -427,12 +451,10 @@ ITEM;
                     break;
 
                 default:
-                    // keep your original defaults for other widget types if required
                     break;
             }
         }
 
-        // Final Samsung clean: remove iframes/scripts but keep <img>
         if ( $is_samsung ) {
             $content = wp_kses( $content, $this->get_samsung_allowed_html() );
         }
@@ -440,13 +462,6 @@ ITEM;
         return mb_convert_encoding( $content, 'UTF-8', 'auto' );
     }
 
-    /**
-     * Render a <figure><img></figure> from either:
-     * - ACF image array (like your debug output)
-     * - Attachment ID (int)
-     *
-     * Returns '' if URL is invalid (prevents src="https://cms.stylist.co.uk/").
-     */
     private function render_image_figure_html( $img, $figure_class = '', $prefer_size = 'square' ) {
         [ $raw_url, $alt, $caption ] = $this->pick_image_fields( $img, $prefer_size );
 
@@ -468,9 +483,6 @@ ITEM;
         return $html;
     }
 
-    /**
-     * Render <img ...> only (used for product thumbnails).
-     */
     private function render_image_img_only_html( $img, $img_class = '', $prefer_size = 'square' ) {
         [ $raw_url, $alt ] = $this->pick_image_fields( $img, $prefer_size, false );
         $url = $this->resolve_image_url( $raw_url );
@@ -482,21 +494,12 @@ ITEM;
         return "<img{$class_attr} alt=\"" . esc_attr( $alt ) . "\" src=\"" . esc_url( $url ) . "\">";
     }
 
-    /**
-     * Extract (url, alt, caption) from either ACF image array or attachment ID.
-     *
-     * @param mixed $img
-     * @param string $prefer_size e.g. 'square', 'large', etc
-     * @param bool $include_caption
-     * @return array
-     */
     private function pick_image_fields( $img, $prefer_size = 'square', $include_caption = true ) {
         $raw_url = '';
         $alt     = '';
         $caption = '';
 
         if ( is_array( $img ) ) {
-            // ACF image array (your debug output)
             $raw_url = $img['sizes'][ $prefer_size ] ?? ( $img['url'] ?? '' );
             $alt     = (string) ( $img['alt'] ?? '' );
             if ( $include_caption ) {
@@ -507,7 +510,6 @@ ITEM;
             if ( $id > 0 ) {
                 $meta = $this->image_helper->get_attachment_metadata( $id );
 
-                // helper-specific + fallbacks
                 $raw_url = $meta['doris_sizes'][ $prefer_size ] ?? ( $meta['url'] ?? ( $meta['source_url'] ?? '' ) );
                 $alt     = (string) ( $meta['alt'] ?? '' );
                 if ( $include_caption ) {
@@ -519,11 +521,6 @@ ITEM;
         return $include_caption ? [ $raw_url, $alt, $caption ] : [ $raw_url, $alt ];
     }
 
-    /**
-     * Allowed HTML for Samsung <content:encoded>.
-     * - keeps <img>
-     * - strips iframes/scripts automatically
-     */
     private function get_samsung_allowed_html() {
         return [
             'p'      => [ 'class' => true ],
@@ -559,9 +556,6 @@ ITEM;
         ];
     }
 
-    /**
-     * Prefer ACF's embed_link (original), avoid embeds.stylist.co.uk URLs.
-     */
     private function get_original_embed_url( array $widget ) {
         $original = trim( (string) ( $widget['embed_link'] ?? '' ) );
         if ( $original && ! str_contains( $original, 'embeds.stylist.co.uk' ) ) {
@@ -582,7 +576,6 @@ ITEM;
     }
 
     private function extract_original_embed_url_from_item( array $item ) {
-        // if your item has a canonical url field, use it
         $maybe = trim( (string) ( $item['url'] ?? '' ) );
         if ( $maybe && ! str_contains( $maybe, 'embeds.stylist.co.uk' ) ) {
             return $maybe;
@@ -600,10 +593,6 @@ ITEM;
         return '';
     }
 
-    /**
-     * Return a usable absolute image URL or ''.
-     * Prevents domain-only URLs like "https://cms.stylist.co.uk/" and ensures file extension.
-     */
     private function resolve_image_url( $raw_url ) {
         $url = $this->resolve_asset_url( $raw_url );
         if ( ! $url ) {
@@ -617,7 +606,6 @@ ITEM;
             return '';
         }
 
-        // Allow common raster formats. Add svg if you need it.
         if ( ! preg_match( '#\.(jpe?g|png|gif|webp|avif)(\?.*)?$#i', $path ) ) {
             return '';
         }
@@ -625,9 +613,6 @@ ITEM;
         return $url;
     }
 
-    /**
-     * Ensure asset URLs are absolute and optionally rewritten to $images_host.
-     */
     private function resolve_asset_url( $raw_url ) {
         $raw_url = trim( (string) $raw_url );
         if ( $raw_url === '' ) {
