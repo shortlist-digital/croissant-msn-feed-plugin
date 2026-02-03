@@ -218,7 +218,7 @@ ITEM;
 
         // HERO CREDIT: try common ACF keys; adjust if your field uses a specific key.
         $credit_raw = '';
-        foreach ( ['credit'] as $k ) {
+        foreach ( ['description'] as $k ) {
             if ( ! empty( $image[ $k ] ) ) {
                 $credit_raw = $image[ $k ];
                 break;
